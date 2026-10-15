@@ -1,0 +1,21 @@
+# REVIEW.md
+
+List every defect you found in the starter `app/main.py` (helpers and endpoints). For each one:
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | `health()` | Returns `{"status": "ok"}` unconditionally without verifying database connectivity. | Disconnecting MongoDB would still return a 200 instead of the required 503. | Added a `client.admin.command('ping')` call wrapped in a `try...except` block to raise a 503 HTTP exception on failure. |
+| 2 | `create_employee()` | Uses `find_one` to check for duplicates before inserting, creating a race condition. | Two concurrent requests with the same `emp_code` could both pass the check and insert duplicates. | Removed `find_one` and relied on a MongoDB unique index on `emp_code`, catching `DuplicateKeyError` to return a 409. |
+| 3 | `create_employee()` | Returns `created_at` as a Python `datetime` object. | The API response fails schema validation because instants must be integer epoch milliseconds. | Converted `created_at` to an epoch integer (`int(ts.timestamp() * 1000)`) before returning it in the API response. |
+| 4 | `list_employees()` | Calculates pagination skip as `page * page_size`. | Requesting `page=1` (the default) skips the first 20 records, hiding the first page of data. | Changed the skip formula to `(page - 1) * page_size`. |
+| 5 | `list_employees()` | Computes `total` using an empty filter `{}` via `db.employees.count_documents({})`. | When filtering by `department`, `total` still returns the count of the entire collection. | Passed the query object `q` into `count_documents(q)`. |
+| 6 | `punch_in()` | Extracts `date` using local time without accounting for overnight shifts. | A punch-in at 01:00 for a 22:00-06:00 shift incorrectly assigns the record to the new calendar date. | Added logic to check if `shift_end <= shift_start` and if the punch-in time is before `shift_end`, adjusting the date back by 1 day. |
+| 7 | `punch_in()` | Fails to truncate instants to whole seconds before calculating values. | A punch-in at 09:40:00.900 results in incorrect `late_minutes` calculations due to microsecond remainders. | Truncated `punched_at` to seconds using `replace(microsecond=0)` before any derived field calculations. |
+| 8 | `punch_in()` | Implements check-then-insert via `find_one`, creating a race condition. | Concurrent punch-ins for the same employee and date result in duplicate attendance records instead of a single 201 and subsequent 409s. | Enforced a unique compound index on `(emp_code, date)` and caught `DuplicateKeyError` to return 409. |
+| 9 | `list_attendance()` | Loads all matched documents into application memory using `list(db.attendance_logs.find(q))` before sorting and slicing. | At 100,000 records, the endpoint consumes massive memory and crashes or slows to a crawl. | Applied `.sort()`, `.skip()`, and `.limit()` directly to the PyMongo cursor so MongoDB handles pagination and sorting natively. |
+| 10 | `list_attendance()` & `punch_in()` | Modifies the returned document to include an `id` field and leaves `punch_in`/`punch_out` as BSON datetime objects. | Response validation fails because `AttendanceRecord` does not permit an `id` field, and requires epoch milliseconds instead of datetimes. | Removed `id` injection and converted all datetimes in the response dictionary to epoch millisecond integers. |
+
+Also note anything you looked at and decided was **not** a defect, and why(My point of View):
+
+*   **Popping `_id` before return**: In `create_employee()`, the code calls `doc.pop("_id", None)`. I reviewed this and determined it is exactly correct. The `DATA_MODEL.md` and `openapi.yaml` files explicitly state that `_id` is internal to MongoDB and must never appear in a request or response.
+*   **Truncating floats in `compute_late_minutes()`**: The helper function uses `int()` to calculate elapsed minutes. This effectively applies a `floor` operation. I reviewed Rule R2, which specifies "whole minutes (floor)", so this implementation detail is mathematically correct.
